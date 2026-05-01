@@ -46,18 +46,19 @@ func (r *retryState) Reset() {
 	r.current = 15 * time.Second
 }
 
-
 type Client struct {
-	cfg        *config.Config
-	app        *app.App
-	logger     *logrus.Logger
-	raw        *gosteam.Client
-	dotaMu     sync.Mutex
-	dotaClient *dota.Client
-	onReady    OnDotaReadyFunc
-	retry      *retryState
-	stopping   atomic.Bool
-	shutdownCh chan struct{}
+	cfg         *config.Config
+	app         *app.App
+	logger      *logrus.Logger
+	raw         *gosteam.Client
+	dotaMu      sync.Mutex
+	dotaClient  *dota.Client
+	onReady     OnDotaReadyFunc
+	retry       *retryState
+	stopping    atomic.Bool
+	shutdownCh  chan struct{}
+	watchMu     sync.Mutex
+	watchCancel context.CancelFunc
 }
 
 func New(cfg *config.Config, a *app.App, logger *logrus.Logger, onReady OnDotaReadyFunc) *Client {
@@ -84,6 +85,8 @@ func (c *Client) Disconnect() {
 	c.stopping.Store(true)
 	close(c.shutdownCh)
 
+	c.cancelLobbyWatcher()
+
 	c.dotaMu.Lock()
 	d := c.dotaClient
 	c.dotaMu.Unlock()
@@ -107,7 +110,7 @@ func (c *Client) RunEventLoop() {
 	c.logger.Info("[Steam] Loop de eventos encerrado")
 }
 
-func (c *Client) handleEvent(event interface{}) {
+func (c *Client) handleEvent(event any) {
 	switch e := event.(type) {
 
 	case *gosteam.ConnectedEvent:
@@ -121,7 +124,6 @@ func (c *Client) handleEvent(event interface{}) {
 			"result": e.Result.String(),
 			"code":   int(e.Result),
 		}).Error("[Steam] Login falhou — verifique usuário, senha e 2FA")
-		// Não usa Fatal para não matar o processo — reconexão vai tentar novamente
 
 	case *gosteam.MachineAuthUpdateEvent:
 		c.onMachineAuth(e)
@@ -135,11 +137,7 @@ func (c *Client) handleEvent(event interface{}) {
 	case *devents.GCConnectionStatusChanged:
 		c.onGCStatusChanged(e)
 
-	case devents.ClientStateChanged:
-		c.onLobbyStateChanged(e)
-
 	case error:
-		// FatalErrorEvent é `type FatalErrorEvent error`; steam desconecta automaticamente
 		c.logger.WithError(e).Error("[Steam] Erro recebido do cliente Steam")
 	}
 }
@@ -207,6 +205,8 @@ func (c *Client) onMachineAuth(e *gosteam.MachineAuthUpdateEvent) {
 func (c *Client) onDisconnected() {
 	c.logger.Warn("[Steam] Desconectado dos servidores Steam")
 
+	c.cancelLobbyWatcher()
+
 	c.dotaMu.Lock()
 	c.dotaClient = nil
 	c.dotaMu.Unlock()
@@ -222,29 +222,26 @@ func (c *Client) onDisconnected() {
 }
 
 func (c *Client) reconnectLoop() {
-	for {
-		if c.stopping.Load() {
-			c.logger.Info("[Reconnect] Shutdown em andamento — cancelando reconexão")
-			return
-		}
-
-		delay := c.retry.Next()
-		c.logger.WithFields(logrus.Fields{
-			"delay":      delay.String(),
-			"next_max":   c.retry.max.String(),
-		}).Info("[Reconnect] Aguardando antes de reconectar ao Steam...")
-
-		select {
-		case <-c.shutdownCh:
-			c.logger.Info("[Reconnect] Shutdown recebido durante espera — cancelando")
-			return
-		case <-time.After(delay):
-		}
-
-		c.logger.Info("[Reconnect] Tentando reconectar ao Steam...")
-		c.raw.Connect()
-		return // sai do loop — próxima desconexão vai chamar reconnectLoop novamente
+	if c.stopping.Load() {
+		c.logger.Info("[Reconnect] Shutdown em andamento — cancelando reconexão")
+		return
 	}
+
+	delay := c.retry.Next()
+	c.logger.WithFields(logrus.Fields{
+		"delay":    delay.String(),
+		"next_max": c.retry.max.String(),
+	}).Info("[Reconnect] Aguardando antes de reconectar ao Steam...")
+
+	select {
+	case <-c.shutdownCh:
+		c.logger.Info("[Reconnect] Shutdown recebido durante espera — cancelando")
+		return
+	case <-time.After(delay):
+	}
+
+	c.logger.Info("[Reconnect] Tentando reconectar ao Steam...")
+	c.raw.Connect()
 }
 
 func (c *Client) onGCWelcomed(e *devents.ClientWelcomed) {
@@ -256,6 +253,10 @@ func (c *Client) onGCWelcomed(e *devents.ClientWelcomed) {
 	c.dotaMu.Lock()
 	d := c.dotaClient
 	c.dotaMu.Unlock()
+
+	if d != nil {
+		c.startLobbyWatcher(d)
+	}
 
 	if d != nil && c.onReady != nil {
 		c.logger.Info("[GC] Notificando listeners que o GC está pronto...")
@@ -279,73 +280,102 @@ func (c *Client) onGCStatusChanged(e *devents.GCConnectionStatusChanged) {
 	}
 }
 
-func (c *Client) onLobbyStateChanged(e devents.ClientStateChanged) {
-	oldLobby := e.OldState.Lobby
-	newLobby := e.NewState.Lobby
-
-	if oldLobby == nil && newLobby != nil {
-		c.logger.WithField("name", newLobby.GetGameName()).Info("[Lobby] Lobby criado")
-	} else if oldLobby != nil && newLobby == nil {
-		c.logger.Info("[Lobby] Lobby encerrado")
-		return
+func (c *Client) cancelLobbyWatcher() {
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	if c.watchCancel != nil {
+		c.watchCancel()
+		c.watchCancel = nil
 	}
+}
 
-	if newLobby == nil {
-		return
+func (c *Client) startLobbyWatcher(d *dota.Client) {
+	c.watchMu.Lock()
+	if c.watchCancel != nil {
+		c.watchCancel()
 	}
-
-	// Indexa membros antigos por ID para detectar mudanças
-	oldMembers := make(map[uint64]*protocol.CSODOTALobbyMember, len(oldLobby.GetAllMembers()))
-	for _, m := range oldLobby.GetAllMembers() {
-		oldMembers[m.GetId()] = m
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.watchCancel = cancel
+	c.watchMu.Unlock()
 
 	botID := c.raw.SteamId().ToUint64()
+	var prevMembers map[uint64]*protocol.CSODOTALobbyMember
 
-	for _, m := range newLobby.GetAllMembers() {
-		id := m.GetId()
-		team := m.GetTeam()
+	err := d.WatchLobby(ctx, func(evType socache.EventType, lobby *protocol.CSODOTALobby) {
+		c.handleLobbyEvent(evType, lobby, &prevMembers, botID, d)
+	})
+	if err != nil {
+		c.logger.WithError(err).Error("[Lobby] Falha ao iniciar watcher de lobby")
+		return
+	}
+	c.logger.Info("[Lobby] Watcher de lobby iniciado via SOCache")
+}
 
-		if old, ok := oldMembers[id]; !ok {
-			c.logger.WithFields(logrus.Fields{
-				"steamid": id,
-				"team":    team.String(),
-				"slot":    m.GetSlot(),
-			}).Info("[Lobby] Jogador entrou")
-		} else if old.GetTeam() != team || old.GetSlot() != m.GetSlot() {
-			c.logger.WithFields(logrus.Fields{
-				"steamid":  id,
-				"old_team": old.GetTeam().String(),
-				"old_slot": old.GetSlot(),
-				"new_team": team.String(),
-				"new_slot": m.GetSlot(),
-			}).Info("[Lobby] Jogador mudou de time/slot")
+func (c *Client) handleLobbyEvent(
+	evType socache.EventType,
+	lobby *protocol.CSODOTALobby,
+	prevMembers *map[uint64]*protocol.CSODOTALobbyMember,
+	botID uint64,
+	d *dota.Client,
+) {
+	switch evType {
+	case socache.EventTypeCreate:
+		c.logger.WithField("name", lobby.GetGameName()).Info("[Lobby] Lobby criado")
+	case socache.EventTypeDestroy:
+		c.logger.Info("[Lobby] Lobby destruído")
+		*prevMembers = nil
+		return
+	}
+
+	curr := make(map[uint64]*protocol.CSODOTALobbyMember, len(lobby.GetAllMembers()))
+	for _, m := range lobby.GetAllMembers() {
+		curr[m.GetId()] = m
+	}
+
+	if *prevMembers != nil {
+		for id, m := range curr {
+			if _, existed := (*prevMembers)[id]; !existed {
+				c.logger.WithFields(logrus.Fields{
+					"steamid": id,
+					"team":    m.GetTeam().String(),
+					"slot":    m.GetSlot(),
+				}).Info("[Lobby] Jogador entrou")
+			}
 		}
-
-		delete(oldMembers, id)
-
-		// Se o bot foi parar num slot de jogador, move para player pool
-		if id == botID {
-			if team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS ||
-				team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS {
-				c.logger.WithField("team", team.String()).
-					Info("[Lobby] Bot detectado em slot de jogador — movendo para player pool...")
-				c.dotaMu.Lock()
-				d := c.dotaClient
-				c.dotaMu.Unlock()
-				if d != nil {
-					d.JoinPlayerPool()
+		for id, m := range *prevMembers {
+			if _, exists := curr[id]; !exists {
+				c.logger.WithFields(logrus.Fields{
+					"steamid": id,
+					"team":    m.GetTeam().String(),
+					"slot":    m.GetSlot(),
+				}).Info("[Lobby] Jogador saiu")
+			}
+		}
+		for id, m := range curr {
+			if old, existed := (*prevMembers)[id]; existed {
+				if old.GetTeam() != m.GetTeam() || old.GetSlot() != m.GetSlot() {
+					c.logger.WithFields(logrus.Fields{
+						"steamid":  id,
+						"old_team": old.GetTeam().String(),
+						"old_slot": old.GetSlot(),
+						"new_team": m.GetTeam().String(),
+						"new_slot": m.GetSlot(),
+					}).Info("[Lobby] Jogador mudou de time/slot")
 				}
 			}
 		}
 	}
 
-	for id, m := range oldMembers {
-		c.logger.WithFields(logrus.Fields{
-			"steamid": id,
-			"team":    m.GetTeam().String(),
-			"slot":    m.GetSlot(),
-		}).Info("[Lobby] Jogador saiu")
+	*prevMembers = curr
+
+	if botMember, ok := curr[botID]; ok {
+		team := botMember.GetTeam()
+		if team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS ||
+			team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS {
+			c.logger.WithField("team", team.String()).
+				Info("[Lobby] Bot detectado em slot de jogador — movendo para player pool...")
+			d.JoinPlayerPool()
+		}
 	}
 }
 
