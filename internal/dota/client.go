@@ -135,6 +135,13 @@ func (c *Client) JoinBroadcastChannel() {
 	c.d.JoinLobbyBroadcastChannel(0, "", "", "")
 }
 
+func (c *Client) JoinPlayerPool() {
+	team := protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_PLAYER_POOL
+	var slot uint32 = 0
+	c.logger.Info("[Dota] Movendo bot para player pool...")
+	c.d.JoinLobbyTeam(team, slot)
+}
+
 func (c *Client) LeaveLobby() {
 	c.logger.Info("[Dota] Saindo do lobby...")
 	c.d.LeaveLobby()
