@@ -32,6 +32,7 @@ func New(port string, a *app.App, getDota DotaClientFunc, logger *logrus.Logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/lobby", s.handleLobby)
+	mux.HandleFunc("/lobby/leave", s.handleLeaveLobby)
 
 	s.httpServer = &http.Server{
 		Addr:    ":" + port,
@@ -146,6 +147,39 @@ func (s *Server) handleCreateLobby(w http.ResponseWriter, r *http.Request) {
 		"name":     req.Name,
 		"password": req.Password,
 	})
+}
+
+func (s *Server) handleLeaveLobby(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.logger.Info("[API] POST /lobby/leave — solicitação de saída do lobby recebida")
+
+	if !s.app.IsGCReady() {
+		s.logger.Warn("[API] POST /lobby/leave rejeitado — GC não está pronto")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "GC não está pronto"})
+		return
+	}
+
+	d := s.getDota()
+	if d == nil {
+		s.logger.Warn("[API] POST /lobby/leave rejeitado — cliente Dota não disponível")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "cliente Dota não disponível"})
+		return
+	}
+
+	d.LeaveLobby()
+	s.app.SetLobby(nil)
+	s.logger.Info("[API] Bot saiu do lobby")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 func (s *Server) handleDestroyLobby(w http.ResponseWriter, r *http.Request) {

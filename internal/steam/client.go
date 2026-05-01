@@ -169,9 +169,7 @@ func (c *Client) onLoggedOn(e *gosteam.LoggedOnEvent) {
 	}).Info("[Steam] Login realizado com sucesso")
 
 	c.retry.Reset()
-	c.logger.Info("[Steam] Contador de reconexão resetado após login bem-sucedido")
 
-	c.logger.Info("[Steam] Definindo estado de persona para Online...")
 	c.raw.Social.SetPersonaState(steamlang.EPersonaState_Online)
 
 	c.logger.Info("[GC] Inicializando cliente Dota 2 GC...")
@@ -180,17 +178,27 @@ func (c *Client) onLoggedOn(e *gosteam.LoggedOnEvent) {
 	c.logger.Info("[GC] Notificando Steam que estamos jogando Dota 2 (AppID 570)...")
 	rawDota.SetPlaying(true)
 
-	c.logger.Info("[GC] Aguardando 3s antes de enviar SayHello...")
-	time.Sleep(3 * time.Second)
-
-	c.logger.Info("[GC] Enviando SayHello ao Game Coordinator — aguardando sessão GC...")
-	rawDota.SayHello()
-
 	dotaClient := dota.New(rawDota, c.logger)
-
 	c.dotaMu.Lock()
 	c.dotaClient = dotaClient
 	c.dotaMu.Unlock()
+
+	// SayHello em goroutine para não bloquear o event loop durante o sleep
+	go func() {
+		c.logger.Info("[GC] Aguardando 3s antes de enviar SayHello...")
+		time.Sleep(3 * time.Second)
+
+		c.dotaMu.Lock()
+		still := c.dotaClient == dotaClient
+		c.dotaMu.Unlock()
+		if !still {
+			c.logger.Info("[GC] Conexão encerrada durante espera — SayHello cancelado")
+			return
+		}
+
+		c.logger.Info("[GC] Enviando SayHello ao Game Coordinator — aguardando sessão GC...")
+		rawDota.SayHello()
+	}()
 }
 
 func (c *Client) onMachineAuth(e *gosteam.MachineAuthUpdateEvent) {
@@ -373,8 +381,11 @@ func (c *Client) handleLobbyEvent(
 		if team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS ||
 			team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS {
 			c.logger.WithField("team", team.String()).
-				Info("[Lobby] Bot detectado em slot de jogador — movendo para player pool...")
-			d.JoinPlayerPool()
+				Info("[Lobby] Bot detectado em slot de jogador — movendo para broadcast channel em 1s...")
+			go func() {
+				time.Sleep(time.Second)
+				d.JoinBroadcastChannel()
+			}()
 		}
 	}
 }
