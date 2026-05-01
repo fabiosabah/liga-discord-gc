@@ -308,9 +308,10 @@ func (c *Client) startLobbyWatcher(d *dota.Client) {
 
 	botID := c.raw.SteamId().ToUint64()
 	var prevMembers map[uint64]*protocol.CSODOTALobbyMember
+	var launched bool
 
 	err := d.WatchLobby(ctx, func(evType socache.EventType, lobby *protocol.CSODOTALobby) {
-		c.handleLobbyEvent(evType, lobby, &prevMembers, botID, d)
+		c.handleLobbyEvent(evType, lobby, &prevMembers, &launched, botID, d)
 	})
 	if err != nil {
 		c.logger.WithError(err).Error("[Lobby] Falha ao iniciar watcher de lobby")
@@ -323,15 +324,18 @@ func (c *Client) handleLobbyEvent(
 	evType socache.EventType,
 	lobby *protocol.CSODOTALobby,
 	prevMembers *map[uint64]*protocol.CSODOTALobbyMember,
+	launched *bool,
 	botID uint64,
 	d *dota.Client,
 ) {
 	switch evType {
 	case socache.EventTypeCreate:
 		c.logger.WithField("name", lobby.GetGameName()).Info("[Lobby] Lobby criado")
+		*launched = false
 	case socache.EventTypeDestroy:
 		c.logger.Info("[Lobby] Lobby destruído")
 		*prevMembers = nil
+		*launched = false
 		return
 	}
 
@@ -386,6 +390,39 @@ func (c *Client) handleLobbyEvent(
 				time.Sleep(time.Second)
 				d.JoinBroadcastChannel()
 			}()
+		}
+	}
+
+	// Auto-start para lobby 1v1: inicia quando Radiant e Dire têm 1 jogador cada
+	if !*launched {
+		if info := c.app.GetLobby(); info != nil && info.Preset == "1v1" {
+			var goodGuys, badGuys int
+			for id, m := range curr {
+				if id == botID {
+					continue
+				}
+				switch m.GetTeam() {
+				case protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS:
+					goodGuys++
+				case protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS:
+					badGuys++
+				}
+			}
+			if goodGuys >= 1 && badGuys >= 1 {
+				*launched = true
+				c.logger.WithFields(logrus.Fields{
+					"good_guys": goodGuys,
+					"bad_guys":  badGuys,
+				}).Info("[Lobby] 1v1 pronto — iniciando partida em 2s...")
+				go func() {
+					time.Sleep(2 * time.Second)
+					d.LaunchLobby()
+					time.Sleep(time.Second)
+					d.LeaveLobby()
+					c.app.SetLobby(nil)
+					c.logger.Info("[Lobby] Partida 1v1 iniciada — bot saiu do lobby")
+				}()
+			}
 		}
 	}
 }

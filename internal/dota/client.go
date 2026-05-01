@@ -140,6 +140,11 @@ func (c *Client) LeaveLobby() {
 	c.d.LeaveLobby()
 }
 
+func (c *Client) LaunchLobby() {
+	c.logger.Info("[Dota] Iniciando partida...")
+	c.d.LaunchLobby()
+}
+
 func (c *Client) DestroyLobby(ctx context.Context) error {
 	c.logger.Info("[Dota] Destruindo lobby...")
 
