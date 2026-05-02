@@ -30,6 +30,10 @@ func New(apiKey string, logger *logrus.Logger) *Client {
 // GetMatchDetails fetches raw match data from the Steam Web API and logs key fields.
 // Returns the raw JSON body to be forwarded as-is to the caller.
 func (c *Client) GetMatchDetails(ctx context.Context, matchID uint64) (json.RawMessage, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("STEAM_API_KEY não configurada no serviço GC")
+	}
+
 	url := fmt.Sprintf("%s?match_id=%d&key=%s", matchDetailsURL, matchID, c.apiKey)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
