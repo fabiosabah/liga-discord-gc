@@ -309,9 +309,10 @@ func (c *Client) startLobbyWatcher(d *dota.Client) {
 	botID := c.raw.SteamId().ToUint64()
 	var prevMembers map[uint64]*protocol.CSODOTALobbyMember
 	var launched bool
+	var botMovePending bool
 
 	err := d.WatchLobby(ctx, func(evType socache.EventType, lobby *protocol.CSODOTALobby) {
-		c.handleLobbyEvent(evType, lobby, &prevMembers, &launched, botID, d)
+		c.handleLobbyEvent(evType, lobby, &prevMembers, &launched, &botMovePending, botID, d)
 	})
 	if err != nil {
 		c.logger.WithError(err).Error("[Lobby] Falha ao iniciar watcher de lobby")
@@ -325,6 +326,7 @@ func (c *Client) handleLobbyEvent(
 	lobby *protocol.CSODOTALobby,
 	prevMembers *map[uint64]*protocol.CSODOTALobbyMember,
 	launched *bool,
+	botMovePending *bool,
 	botID uint64,
 	d *dota.Client,
 ) {
@@ -332,10 +334,12 @@ func (c *Client) handleLobbyEvent(
 	case socache.EventTypeCreate:
 		c.logger.WithField("name", lobby.GetGameName()).Info("[Lobby] Lobby criado")
 		*launched = false
+		*botMovePending = false
 	case socache.EventTypeDestroy:
 		c.logger.Info("[Lobby] Lobby destruído")
 		*prevMembers = nil
 		*launched = false
+		*botMovePending = false
 		return
 	}
 
@@ -384,12 +388,17 @@ func (c *Client) handleLobbyEvent(
 		team := botMember.GetTeam()
 		if team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS ||
 			team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS {
-			c.logger.WithField("team", team.String()).
-				Info("[Lobby] Bot detectado em slot de jogador — movendo para player pool em 1s...")
-			go func() {
-				time.Sleep(time.Second)
-				d.JoinPlayerPool()
-			}()
+			if !*botMovePending {
+				*botMovePending = true
+				c.logger.WithField("team", team.String()).
+					Info("[Lobby] Bot detectado em slot de jogador — movendo para broadcast channel em 1s...")
+				go func() {
+					time.Sleep(time.Second)
+					d.JoinBroadcastChannel()
+				}()
+			}
+		} else {
+			*botMovePending = false
 		}
 	}
 
