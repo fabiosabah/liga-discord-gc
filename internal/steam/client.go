@@ -384,23 +384,12 @@ func (c *Client) handleLobbyEvent(
 		team := botMember.GetTeam()
 		if team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS ||
 			team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS {
-			info := c.app.GetLobby()
-			is1v1 := info != nil && info.Preset == "1v1"
-			if is1v1 {
-				c.logger.WithField("team", team.String()).
-					Info("[Lobby] Bot detectado em slot de jogador (1v1) — movendo para player pool em 1s...")
-				go func() {
-					time.Sleep(time.Second)
-					d.JoinPlayerPool()
-				}()
-			} else {
-				c.logger.WithField("team", team.String()).
-					Info("[Lobby] Bot detectado em slot de jogador — movendo para broadcast channel em 1s...")
-				go func() {
-					time.Sleep(time.Second)
-					d.JoinBroadcastChannel()
-				}()
-			}
+			c.logger.WithField("team", team.String()).
+				Info("[Lobby] Bot detectado em slot de jogador — movendo para player pool em 1s...")
+			go func() {
+				time.Sleep(time.Second)
+				d.JoinPlayerPool()
+			}()
 		}
 	}
 
