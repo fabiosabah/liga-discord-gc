@@ -246,11 +246,20 @@ func (s *Server) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.logger.WithFields(logrus.Fields{
+		"match_id":   matchID,
+		"result":     resp.GetResult(),
+		"has_match":  resp.GetMatch() != nil,
+	}).Info("[API] Resposta do GC para match details")
+
 	match := resp.GetMatch()
 	if match == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "partida não encontrada"})
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":  "partida não encontrada",
+			"result": strconv.FormatUint(uint64(resp.GetResult()), 10),
+		})
 		return
 	}
 
