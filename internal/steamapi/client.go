@@ -53,6 +53,13 @@ func (c *Client) GetMatchDetails(ctx context.Context, matchID uint64) (json.RawM
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		c.logger.WithFields(logrus.Fields{
+			"match_id":     matchID,
+			"status":       resp.StatusCode,
+			"content_type": resp.Header.Get("Content-Type"),
+			"body_bytes":   len(body),
+			"body":         string(body),
+		}).Error("[SteamAPI] Resposta de erro")
 		return nil, fmt.Errorf("steam api retornou %d: %s", resp.StatusCode, string(body))
 	}
 

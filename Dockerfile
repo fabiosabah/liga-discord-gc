@@ -10,6 +10,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o liga-discord-gc .
 
 FROM alpine:3.20
 
+RUN apk add --no-cache ca-certificates
+
 WORKDIR /app
 
 COPY --from=builder /build/liga-discord-gc .
