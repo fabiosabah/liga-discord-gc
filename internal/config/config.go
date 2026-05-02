@@ -10,6 +10,7 @@ type Config struct {
 	SteamPassword string
 	Steam2FACode  string
 	HTTPPort      string
+	SteamAPIKey   string
 }
 
 func Load() (*Config, error) {
@@ -23,6 +24,7 @@ func Load() (*Config, error) {
 		SteamPassword: os.Getenv("STEAM_PASSWORD"),
 		Steam2FACode:  os.Getenv("STEAM_2FA_CODE"),
 		HTTPPort:      port,
+		SteamAPIKey:   os.Getenv("STEAM_API_KEY"),
 	}
 
 	if cfg.SteamUsername == "" || cfg.SteamPassword == "" {

@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
 	"liga-discord-gc/internal/app"
 	"liga-discord-gc/internal/dota"
+	"liga-discord-gc/internal/steamapi"
 )
+
 
 // DotaClientFunc returns the current Dota client (may be nil).
 type DotaClientFunc func() *dota.Client
@@ -20,19 +23,22 @@ type Server struct {
 	getDota    DotaClientFunc
 	logger     *logrus.Logger
 	httpServer *http.Server
+	steam      *steamapi.Client
 }
 
-func New(port string, a *app.App, getDota DotaClientFunc, logger *logrus.Logger) *Server {
+func New(port string, a *app.App, getDota DotaClientFunc, logger *logrus.Logger, steamAPIKey string) *Server {
 	s := &Server{
 		app:     a,
 		getDota: getDota,
 		logger:  logger,
+		steam:   steamapi.New(steamAPIKey, logger),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/lobby", s.handleLobby)
 	mux.HandleFunc("/lobby/leave", s.handleLeaveLobby)
+	mux.HandleFunc("/match/{id}", s.handleMatchDetails)
 
 	s.httpServer = &http.Server{
 		Addr:    ":" + port,
@@ -180,6 +186,35 @@ func (s *Server) handleLeaveLobby(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func (s *Server) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rawID := r.PathValue("id")
+	matchID, err := strconv.ParseUint(rawID, 10, 64)
+	if err != nil {
+		http.Error(w, "match id inválido", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	body, err := s.steam.GetMatchDetails(ctx, matchID)
+	if err != nil {
+		s.logger.WithError(err).Error("[API] GET /match falhou")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 func (s *Server) handleDestroyLobby(w http.ResponseWriter, r *http.Request) {
