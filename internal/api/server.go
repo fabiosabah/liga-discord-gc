@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -198,12 +199,13 @@ type matchPlayerDTO struct {
 }
 
 type matchResultDTO struct {
-	MatchID    uint64           `json:"match_id"`
-	Duration   uint32           `json:"duration"`
-	RadiantWin bool             `json:"radiant_win"`
-	GameMode   int32            `json:"game_mode"`
-	LobbyType  uint32           `json:"lobby_type"`
-	Players    []matchPlayerDTO `json:"players"`
+	MatchID      uint64           `json:"match_id"`
+	Duration     uint32           `json:"duration"`
+	DurationFmt  string           `json:"duration_fmt"`
+	RadiantWin   bool             `json:"radiant_win"`
+	GameMode     int32            `json:"game_mode"`
+	LobbyType    uint32           `json:"lobby_type"`
+	Players      []matchPlayerDTO `json:"players"`
 }
 
 func (s *Server) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
@@ -278,13 +280,15 @@ func (s *Server) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	dur := match.GetDuration()
 	result := matchResultDTO{
-		MatchID:    match.GetMatchId(),
-		Duration:   match.GetDuration(),
-		RadiantWin: match.GetMatchOutcome() == 2, // k_EMatchOutcome_RadiantVictory
-		GameMode:   int32(match.GetGameMode()),
-		LobbyType:  match.GetLobbyType(),
-		Players:    players,
+		MatchID:     match.GetMatchId(),
+		Duration:    dur,
+		DurationFmt: fmt.Sprintf("%d:%02d", dur/60, dur%60),
+		RadiantWin:  match.GetMatchOutcome() == 2, // k_EMatchOutcome_RadiantVictory
+		GameMode:    int32(match.GetGameMode()),
+		LobbyType:   match.GetLobbyType(),
+		Players:     players,
 	}
 
 	s.logger.WithFields(logrus.Fields{
