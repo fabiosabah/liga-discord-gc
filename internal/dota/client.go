@@ -152,6 +152,12 @@ func (c *Client) LaunchLobby() {
 	c.d.LaunchLobby()
 }
 
+// GetMatchDetails busca os detalhes de uma partida via GC (não requer Steam Web API key).
+func (c *Client) GetMatchDetails(ctx context.Context, matchID uint64) (*protocol.CMsgGCMatchDetailsResponse, error) {
+	c.logger.WithField("match_id", matchID).Info("[Dota] Solicitando detalhes da partida ao GC...")
+	return c.d.RequestMatchDetails(ctx, matchID)
+}
+
 func (c *Client) DestroyLobby(ctx context.Context) error {
 	c.logger.Info("[Dota] Destruindo lobby...")
 

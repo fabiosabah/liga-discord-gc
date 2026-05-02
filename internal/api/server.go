@@ -11,7 +11,6 @@ import (
 
 	"liga-discord-gc/internal/app"
 	"liga-discord-gc/internal/dota"
-	"liga-discord-gc/internal/steamapi"
 )
 
 
@@ -23,15 +22,13 @@ type Server struct {
 	getDota    DotaClientFunc
 	logger     *logrus.Logger
 	httpServer *http.Server
-	steam      *steamapi.Client
 }
 
-func New(port string, a *app.App, getDota DotaClientFunc, logger *logrus.Logger, steamAPIKey string) *Server {
+func New(port string, a *app.App, getDota DotaClientFunc, logger *logrus.Logger) *Server {
 	s := &Server{
 		app:     a,
 		getDota: getDota,
 		logger:  logger,
-		steam:   steamapi.New(steamAPIKey, logger),
 	}
 
 	mux := http.NewServeMux()
@@ -188,6 +185,27 @@ func (s *Server) handleLeaveLobby(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
+type matchPlayerDTO struct {
+	AccountID  uint32 `json:"account_id"`
+	PlayerSlot uint32 `json:"player_slot"`
+	HeroID     int32  `json:"hero_id"`
+	Kills      uint32 `json:"kills"`
+	Deaths     uint32 `json:"deaths"`
+	Assists    uint32 `json:"assists"`
+	NetWorth   uint32 `json:"net_worth"`
+	Level      uint32 `json:"level"`
+	PlayerName string `json:"player_name"`
+}
+
+type matchResultDTO struct {
+	MatchID    uint64           `json:"match_id"`
+	Duration   uint32           `json:"duration"`
+	RadiantWin bool             `json:"radiant_win"`
+	GameMode   int32            `json:"game_mode"`
+	LobbyType  uint32           `json:"lobby_type"`
+	Players    []matchPlayerDTO `json:"players"`
+}
+
 func (s *Server) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -201,20 +219,74 @@ func (s *Server) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	if !s.app.IsGCReady() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "GC não está pronto"})
+		return
+	}
+
+	d := s.getDota()
+	if d == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "cliente Dota não disponível"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	body, err := s.steam.GetMatchDetails(ctx, matchID)
+	resp, err := d.GetMatchDetails(ctx, matchID)
 	if err != nil {
 		s.logger.WithError(err).Error("[API] GET /match falhou")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
+	match := resp.GetMatch()
+	if match == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "partida não encontrada"})
+		return
+	}
+
+	players := make([]matchPlayerDTO, 0, len(match.GetPlayers()))
+	for _, p := range match.GetPlayers() {
+		players = append(players, matchPlayerDTO{
+			AccountID:  p.GetAccountId(),
+			PlayerSlot: p.GetPlayerSlot(),
+			HeroID:     p.GetHeroId(),
+			Kills:      p.GetKills(),
+			Deaths:     p.GetDeaths(),
+			Assists:    p.GetAssists(),
+			NetWorth:   p.GetNetWorth(),
+			Level:      p.GetLevel(),
+			PlayerName: p.GetPlayerName(),
+		})
+	}
+
+	result := matchResultDTO{
+		MatchID:    match.GetMatchId(),
+		Duration:   match.GetDuration(),
+		RadiantWin: match.GetMatchOutcome() == 2, // k_EMatchOutcome_RadiantVictory
+		GameMode:   int32(match.GetGameMode()),
+		LobbyType:  match.GetLobbyType(),
+		Players:    players,
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"match_id":   result.MatchID,
+		"duration":   result.Duration,
+		"radiant_win": result.RadiantWin,
+		"players":    len(players),
+	}).Info("[API] Detalhes da partida via GC")
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
+	json.NewEncoder(w).Encode(map[string]any{"result": result})
 }
 
 func (s *Server) handleDestroyLobby(w http.ResponseWriter, r *http.Request) {

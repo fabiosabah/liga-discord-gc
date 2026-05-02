@@ -48,7 +48,7 @@ func main() {
 
 	// ── 4. Servidor HTTP ──────────────────────────────
 	logger.WithField("port", cfg.HTTPPort).Info("[Boot] Criando servidor HTTP da API...")
-	srv := api.New(cfg.HTTPPort, a, steam.GetDotaClient, logger, cfg.SteamAPIKey)
+	srv := api.New(cfg.HTTPPort, a, steam.GetDotaClient, logger)
 
 	// ── 5. Inicia o servidor HTTP em background ───────
 	go srv.Start()
