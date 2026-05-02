@@ -297,6 +297,8 @@ func (c *Client) cancelLobbyWatcher() {
 	}
 }
 
+const steamIDOffset = uint64(76561197960265728)
+
 func (c *Client) startLobbyWatcher(d *dota.Client) {
 	c.watchMu.Lock()
 	if c.watchCancel != nil {
@@ -332,7 +334,11 @@ func (c *Client) handleLobbyEvent(
 ) {
 	switch evType {
 	case socache.EventTypeCreate:
-		c.logger.WithField("name", lobby.GetGameName()).Info("[Lobby] Lobby criado")
+		c.logger.WithFields(logrus.Fields{
+			"name":     lobby.GetGameName(),
+			"lobby_id": lobby.GetLobbyId(),
+		}).Info("[Lobby] Lobby criado")
+		c.app.SetLobbyID(lobby.GetLobbyId())
 		*launched = false
 		*botMovePending = false
 	case socache.EventTypeDestroy:
@@ -340,6 +346,7 @@ func (c *Client) handleLobbyEvent(
 		*prevMembers = nil
 		*launched = false
 		*botMovePending = false
+		c.app.SetLobbyStatus(nil)
 		return
 	}
 
@@ -384,6 +391,7 @@ func (c *Client) handleLobbyEvent(
 
 	*prevMembers = curr
 
+	// Move bot para broadcast se estiver em slot de jogador
 	if botMember, ok := curr[botID]; ok {
 		team := botMember.GetTeam()
 		if team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS ||
@@ -391,7 +399,7 @@ func (c *Client) handleLobbyEvent(
 			if !*botMovePending {
 				*botMovePending = true
 				c.logger.WithField("team", team.String()).
-					Info("[Lobby] Bot detectado em slot de jogador — movendo para broadcast channel em 1s...")
+					Info("[Lobby] Bot em slot de jogador — movendo para broadcast em 1s...")
 				go func() {
 					time.Sleep(time.Second)
 					d.JoinBroadcastChannel()
@@ -402,38 +410,120 @@ func (c *Client) handleLobbyEvent(
 		}
 	}
 
-	// Auto-start para lobby 1v1: inicia quando Radiant e Dire têm 1 jogador cada
-	if !*launched {
-		if info := c.app.GetLobby(); info != nil && info.Preset == "1v1" {
-			var goodGuys, badGuys int
-			for id, m := range curr {
-				if id == botID {
-					continue
-				}
-				switch m.GetTeam() {
-				case protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS:
-					goodGuys++
-				case protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS:
-					badGuys++
-				}
+	info := c.app.GetLobby()
+	if info == nil || *launched {
+		return
+	}
+
+	switch info.Preset {
+	case "inhouse":
+		if c.checkInhouseReady(curr, botID, info, d) {
+			*launched = true
+		}
+	case "1v1":
+		var goodGuys, badGuys int
+		for id, m := range curr {
+			if id == botID {
+				continue
 			}
-			if goodGuys >= 1 && badGuys >= 1 {
-				*launched = true
-				c.logger.WithFields(logrus.Fields{
-					"good_guys": goodGuys,
-					"bad_guys":  badGuys,
-				}).Info("[Lobby] 1v1 pronto — iniciando partida em 2s...")
-				go func() {
-					time.Sleep(2 * time.Second)
-					d.LaunchLobby()
-					time.Sleep(time.Second)
-					d.LeaveLobby()
-					c.app.SetLobby(nil)
-					c.logger.Info("[Lobby] Partida 1v1 iniciada — bot saiu do lobby")
-				}()
+			switch m.GetTeam() {
+			case protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS:
+				goodGuys++
+			case protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS:
+				badGuys++
 			}
 		}
+		if goodGuys >= 1 && badGuys >= 1 {
+			*launched = true
+			c.logger.Info("[Lobby] 1v1 pronto — iniciando partida em 2s...")
+			go func() {
+				time.Sleep(2 * time.Second)
+				d.LaunchLobby()
+				time.Sleep(time.Second)
+				d.LeaveLobby()
+				c.app.SetLobby(nil)
+				c.logger.Info("[Lobby] Partida 1v1 iniciada — bot saiu do lobby")
+			}()
+		}
 	}
+}
+
+// checkInhouseReady verifica o estado do lobby inhouse e atualiza o app.LobbyStatus.
+// Retorna true e sai do lobby quando as condições estão completas.
+func (c *Client) checkInhouseReady(
+	curr map[uint64]*protocol.CSODOTALobbyMember,
+	botID uint64,
+	info *app.LobbyInfo,
+	d *dota.Client,
+) bool {
+	// Monta lookup steamID64 → LobbyPlayer para os jogadores convidados
+	invited := make(map[uint64]*app.LobbyPlayer, len(info.Players))
+	for i := range info.Players {
+		p := &info.Players[i]
+		if p.SteamFriendID > 0 {
+			invited[p.SteamFriendID+steamIDOffset] = p
+		}
+	}
+
+	var radiantCaptain, direCaptain *app.LobbyPlayer
+	var inPool []app.LobbyPlayer
+	inLobby := make(map[uint64]bool)
+
+	for id, m := range curr {
+		if id == botID {
+			continue
+		}
+		inLobby[id] = true
+		p, ok := invited[id]
+		if !ok {
+			continue
+		}
+		team := m.GetTeam()
+		slot := m.GetSlot()
+		switch {
+		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS && slot == 0:
+			radiantCaptain = p
+		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS && slot == 0:
+			direCaptain = p
+		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_PLAYER_POOL:
+			inPool = append(inPool, *p)
+		}
+	}
+
+	// Quem ainda não entrou no lobby
+	var missing []string
+	for steamID64, p := range invited {
+		if !inLobby[steamID64] {
+			missing = append(missing, p.DiscordName)
+		}
+	}
+
+	status := &app.LobbyStatus{
+		RadiantCaptain: radiantCaptain,
+		DireCaptain:    direCaptain,
+		InPool:         inPool,
+		Missing:        missing,
+	}
+	c.app.SetLobbyStatus(status)
+
+	c.logger.WithFields(logrus.Fields{
+		"radiant_captain": radiantCaptain != nil,
+		"dire_captain":    direCaptain != nil,
+		"in_pool":         len(inPool),
+		"missing":         missing,
+	}).Info("[Lobby] Estado inhouse")
+
+	if radiantCaptain != nil && direCaptain != nil && len(inPool) >= 8 {
+		c.logger.Info("[Lobby] Inhouse completo — bot saindo em 2s, novo host deve apertar Start")
+		go func() {
+			time.Sleep(2 * time.Second)
+			d.LeaveLobby()
+			c.app.SetLobby(nil)
+			c.logger.Info("[Lobby] Bot saiu do lobby inhouse")
+		}()
+		return true
+	}
+	return false
 }
 
 // GetDotaClient returns the current Dota GC client (nil if not connected).

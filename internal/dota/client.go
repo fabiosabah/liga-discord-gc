@@ -8,6 +8,7 @@ import (
 	"github.com/paralin/go-dota2/cso"
 	"github.com/paralin/go-dota2/protocol"
 	"github.com/paralin/go-dota2/socache"
+	"github.com/paralin/go-steam/steamid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -97,6 +98,7 @@ func (c *Client) CreateLobby(ctx context.Context, req LobbyRequest) error {
 	tvDelay := protocol.LobbyDotaTVDelay_LobbyDotaTV_10
 	pausePolicy := protocol.LobbyDotaPauseSetting_LobbyDotaPauseSetting_Limited
 	vis := protocol.DOTALobbyVisibility_DOTALobbyVisibility_Public
+	doPlayerDraft := req.Preset == PresetInhouse
 
 	details := &protocol.CMsgPracticeLobbySetDetails{
 		GameName:        &name,
@@ -111,6 +113,7 @@ func (c *Client) CreateLobby(ctx context.Context, req LobbyRequest) error {
 		DotaTvDelay:     &tvDelay,
 		PauseSetting:    &pausePolicy,
 		Visibility:      &vis,
+		DoPlayerDraft:   &doPlayerDraft,
 	}
 
 	if err := c.d.LeaveCreateLobby(ctx, details, true); err != nil {
@@ -150,6 +153,23 @@ func (c *Client) LeaveLobby() {
 func (c *Client) LaunchLobby() {
 	c.logger.Info("[Dota] Iniciando partida...")
 	c.d.LaunchLobby()
+}
+
+const steamIDOffset = uint64(76561197960265728)
+
+// FriendIDToSteamID64 converte um Steam Friend ID (32-bit) para SteamID64 (64-bit).
+func FriendIDToSteamID64(friendID uint64) uint64 {
+	return friendID + steamIDOffset
+}
+
+// InvitePlayer convida um jogador pelo Steam Friend ID (32-bit).
+func (c *Client) InvitePlayer(friendID uint64) {
+	steamID64 := FriendIDToSteamID64(friendID)
+	c.logger.WithFields(logrus.Fields{
+		"friend_id": friendID,
+		"steam_id":  steamID64,
+	}).Info("[Dota] Convidando jogador para o lobby...")
+	c.d.InviteLobbyMember(steamid.SteamId(steamID64))
 }
 
 // GetMatchDetails busca os detalhes de uma partida via GC (não requer Steam Web API key).

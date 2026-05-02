@@ -62,14 +62,11 @@ func (s *Server) Shutdown(ctx context.Context) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.logger.Debug("[API] GET /status")
-
-	gcReady := s.app.IsGCReady()
-	lobby := s.app.GetLobby()
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"gc_ready": gcReady,
-		"lobby":    lobby,
+		"gc_ready":     s.app.IsGCReady(),
+		"lobby":        s.app.GetLobby(),
+		"lobby_status": s.app.GetLobbyStatus(),
 	})
 }
 
@@ -105,11 +102,12 @@ func (s *Server) handleCreateLobby(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Preset   string `json:"preset"`   // "inhouse" ou "1v1"
-		Name     string `json:"name"`
-		Password string `json:"password"`
+		Preset   string            `json:"preset"`
+		Name     string            `json:"name"`
+		Password string            `json:"password"`
+		Players  []app.LobbyPlayer `json:"players"`
 	}
-	req.Preset = string(dota.PresetInhouse) // padrão
+	req.Preset = string(dota.PresetInhouse)
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 		s.logger.WithError(err).Warn("[API] POST /lobby — body inválido")
@@ -120,21 +118,19 @@ func (s *Server) handleCreateLobby(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"preset":   req.Preset,
-		"name":     req.Name,
-		"password": req.Password,
+		"preset":  req.Preset,
+		"name":    req.Name,
+		"players": len(req.Players),
 	}).Info("[API] Encaminhando criação de lobby ao cliente Dota...")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	lobbyReq := dota.LobbyRequest{
+	if err := d.CreateLobby(ctx, dota.LobbyRequest{
 		Preset:   dota.Preset(req.Preset),
 		Name:     req.Name,
 		Password: req.Password,
-	}
-
-	if err := d.CreateLobby(ctx, lobbyReq); err != nil {
+	}); err != nil {
 		s.logger.WithError(err).Error("[API] POST /lobby falhou")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -142,8 +138,26 @@ func (s *Server) handleCreateLobby(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.app.SetLobby(&app.LobbyInfo{Name: req.Name, Password: req.Password, Preset: req.Preset})
-	s.logger.WithField("name", req.Name).Info("[API] Lobby criado — bot será movido para player pool via evento do GC")
+	s.app.SetLobby(&app.LobbyInfo{
+		Name:     req.Name,
+		Password: req.Password,
+		Preset:   req.Preset,
+		Players:  req.Players,
+	})
+
+	// Convida todos os jogadores com steam friend ID cadastrado
+	for _, p := range req.Players {
+		if p.SteamFriendID > 0 {
+			d.InvitePlayer(p.SteamFriendID)
+		} else {
+			s.logger.WithField("discord_name", p.DiscordName).Warn("[API] Jogador sem Steam Friend ID — não será convidado")
+		}
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"name":    req.Name,
+		"players": len(req.Players),
+	}).Info("[API] Lobby criado e convites enviados")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
