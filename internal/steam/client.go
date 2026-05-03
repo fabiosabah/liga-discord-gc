@@ -479,11 +479,10 @@ func (c *Client) checkInhouseReady(
 			continue
 		}
 		team := m.GetTeam()
-		slot := m.GetSlot()
 		switch {
-		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS && slot == 0:
+		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_GOOD_GUYS:
 			radiantCaptain = p
-		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS && slot == 0:
+		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_BAD_GUYS:
 			direCaptain = p
 		case team == protocol.DOTA_GC_TEAM_DOTA_GC_TEAM_PLAYER_POOL:
 			inPool = append(inPool, *p)

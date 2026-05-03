@@ -123,6 +123,15 @@ func (s *Server) handleCreateLobby(w http.ResponseWriter, r *http.Request) {
 		"players": len(req.Players),
 	}).Info("[API] Encaminhando criação de lobby ao cliente Dota...")
 
+	// SetLobby before CreateLobby so that SetLobbyID (fired by the SOCache event
+	// during CreateLobby) finds a non-nil lobby to write into.
+	s.app.SetLobby(&app.LobbyInfo{
+		Name:     req.Name,
+		Password: req.Password,
+		Preset:   req.Preset,
+		Players:  req.Players,
+	})
+
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
@@ -131,19 +140,13 @@ func (s *Server) handleCreateLobby(w http.ResponseWriter, r *http.Request) {
 		Name:     req.Name,
 		Password: req.Password,
 	}); err != nil {
+		s.app.SetLobby(nil)
 		s.logger.WithError(err).Error("[API] POST /lobby falhou")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-
-	s.app.SetLobby(&app.LobbyInfo{
-		Name:     req.Name,
-		Password: req.Password,
-		Preset:   req.Preset,
-		Players:  req.Players,
-	})
 
 	// Convida todos os jogadores com steam friend ID cadastrado
 	for _, p := range req.Players {
