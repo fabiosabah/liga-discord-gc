@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -37,6 +38,7 @@ func New(port string, a *app.App, getDota DotaClientFunc, logger *logrus.Logger)
 	mux.HandleFunc("/lobby", s.handleLobby)
 	mux.HandleFunc("/lobby/leave", s.handleLeaveLobby)
 	mux.HandleFunc("/match/{id}", s.handleMatchDetails)
+	mux.HandleFunc("/restart", s.handleRestart)
 
 	s.httpServer = &http.Server{
 		Addr:    ":" + port,
@@ -317,6 +319,20 @@ func (s *Server) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"result": result})
+}
+
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.logger.Warn("[API] POST /restart — reiniciando processo GC...")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(1)
+	}()
 }
 
 func (s *Server) handleDestroyLobby(w http.ResponseWriter, r *http.Request) {
